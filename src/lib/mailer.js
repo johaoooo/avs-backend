@@ -2,26 +2,83 @@
 // Envoi d'emails transactionnels via Resend (HTTP, sans dépendance).
 // Sans RESEND_API_KEY : mode dev — le lien est loggé et renvoyé à l'appelant
 // (jamais en production). Ajoutez RESEND_API_KEY + FRONTEND_URL en prod.
+const nodemailer = require('nodemailer')
 const { NODE_ENV } = require('../config/env')
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY || null
 const RESEND_FROM = process.env.RESEND_FROM || process.env.FROM_EMAIL || 'Agro Véto Services <onboarding@resend.dev>'
 
-async function sendMail({ to, subject, html }) {
-  if (!RESEND_API_KEY) return { sent: false, reason: 'no-mailer' }
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ from: RESEND_FROM, to, subject, html }),
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) {
-    throw new Error(data?.message || `Envoi email impossible (${res.status})`)
+// Configuration SMTP (Gmail, Brevo, OVH, Hostinger, cPanel, etc.)
+const SMTP_HOST = process.env.SMTP_HOST || null
+const SMTP_PORT = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587
+const SMTP_USER = process.env.SMTP_USER || process.env.GMAIL_USER || null
+const SMTP_PASS = process.env.SMTP_PASS || process.env.SMTP_PASSWORD || process.env.GMAIL_APP_PASSWORD || null
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465
+const SMTP_FROM = process.env.SMTP_FROM || process.env.FROM_EMAIL || (SMTP_USER ? `Agro Véto Services <${SMTP_USER}>` : RESEND_FROM)
+
+let transporter = null
+
+function getTransporter() {
+  if (transporter) return transporter
+  if (SMTP_USER && SMTP_PASS) {
+    if (process.env.SMTP_SERVICE === 'gmail' || (SMTP_USER && SMTP_USER.endsWith('@gmail.com') && !SMTP_HOST)) {
+      transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: SMTP_USER,
+          pass: SMTP_PASS,
+        },
+      })
+    } else if (SMTP_HOST) {
+      transporter = nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_SECURE,
+        auth: {
+          user: SMTP_USER,
+          pass: SMTP_PASS,
+        },
+      })
+    }
   }
-  return { sent: true, id: data?.id }
+  return transporter
+}
+
+function hasMailer() {
+  return Boolean(RESEND_API_KEY || (SMTP_USER && SMTP_PASS))
+}
+
+async function sendMail({ to, subject, html }) {
+  // 1. Essai via SMTP (Gmail / Pro) si configuré
+  const smtp = getTransporter()
+  if (smtp) {
+    const info = await smtp.sendMail({
+      from: SMTP_FROM,
+      to,
+      subject,
+      html,
+    })
+    return { sent: true, id: info.messageId, provider: 'smtp' }
+  }
+
+  // 2. Essai via Resend si configuré
+  if (RESEND_API_KEY) {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from: RESEND_FROM, to, subject, html }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(data?.message || `Envoi email impossible (${res.status})`)
+    }
+    return { sent: true, id: data?.id, provider: 'resend' }
+  }
+
+  return { sent: false, reason: 'no-mailer' }
 }
 
 function verificationEmailMail({ name, verifyUrl }) {
