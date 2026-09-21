@@ -547,3 +547,108 @@ exports.resetPassword = async (req, res, next) => {
     next(error)
   }
 }
+
+// ── Connexion / Inscription Google OAuth (Google Identity Services)
+exports.googleAuth = async (req, res, next) => {
+  try {
+    const { credential } = req.body
+    if (!credential) {
+      return res.status(400).json({
+        success: false,
+        message: 'Jeton d’authentification Google manquant.',
+      })
+    }
+
+    // Vérification sécurisée du jeton auprès de l’API officielle Google OAuth2
+    const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`)
+    if (!googleRes.ok) {
+      return res.status(401).json({
+        success: false,
+        message: 'Jeton Google invalide ou expiré.',
+      })
+    }
+
+    const payload = await googleRes.json()
+    const { sub: googleId, email, name, picture, email_verified } = payload
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Impossible de récupérer l’adresse email associée à ce compte Google.',
+      })
+    }
+
+    const normalizedEmail = email.toLowerCase().trim()
+
+    // 1. Recherche de l'utilisateur par googleId ou par email
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { googleId },
+          { email: normalizedEmail },
+        ],
+      },
+    })
+
+    if (user) {
+      // Si l'utilisateur existait déjà, on lie son compte Google et valide son email
+      const updates = {}
+      if (!user.googleId) updates.googleId = googleId
+      if (!user.emailVerified) updates.emailVerified = true
+      if (!user.avatar && picture) updates.avatar = picture
+      if (Object.keys(updates).length > 0) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: updates,
+        })
+      }
+    } else {
+      // 2. Création automatique du compte Google (directement actif et vérifié)
+      const randomPassword = crypto.randomBytes(24).toString('hex')
+      const hashedPassword = await bcrypt.hash(randomPassword, 10)
+
+      user = await prisma.user.create({
+        data: {
+          email: normalizedEmail,
+          password: hashedPassword,
+          name: name || 'Utilisateur Google',
+          googleId,
+          avatar: picture || null,
+          role: 'CLIENT',
+          emailVerified: true,
+        },
+      })
+    }
+
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'Ce compte a été désactivé. Veuillez contacter le support.',
+      })
+    }
+
+    const token = generateToken(user.id)
+
+    const userSafe = {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      phone: user.phone,
+      role: user.role,
+      avatar: user.avatar,
+      emailVerified: user.emailVerified,
+      createdAt: user.createdAt,
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Connexion avec Google réussie !',
+      data: {
+        token,
+        user: userSafe,
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}

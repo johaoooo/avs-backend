@@ -18,6 +18,7 @@ const {
 
 router.post('/register', authLimiter, validate(registerSchema), authController.register)
 router.post('/login', authLimiter, validate(loginSchema), authController.login)
+router.post('/google', authLimiter, authController.googleAuth)
 router.post('/verify-email', sensitiveLimiter, validate(verifyEmailSchema), authController.verifyEmail)
 router.get('/verify-email', sensitiveLimiter, authController.verifyEmail)
 router.post('/resend-verification', sensitiveLimiter, validate(resendVerificationSchema), authController.resendVerification)

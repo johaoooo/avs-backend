@@ -44,6 +44,9 @@ model User {
   emailVerificationToken   String?   @unique
   emailVerificationExpires DateTime?
 
+  // Connexion Google OAuth
+  googleId                 String?   @unique
+
   orders       Order[]
   appointments Appointment[]
   invoices     Invoice[]
