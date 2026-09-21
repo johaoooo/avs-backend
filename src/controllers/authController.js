@@ -103,7 +103,7 @@ exports.register = async (req, res, next) => {
     }
 
     let devVerifyUrl = null
-    if (!isProd() && !hasMailer()) {
+    if (!hasMailer()) {
       devVerifyUrl = verifyUrl
     }
 
@@ -316,7 +316,7 @@ exports.resendVerification = async (req, res, next) => {
     }
 
     let devVerifyUrl = null
-    if (!isProd() && !hasMailer()) {
+    if (!hasMailer()) {
       devVerifyUrl = verifyUrl
     }
 
