@@ -8,6 +8,8 @@ const { authLimiter, sensitiveLimiter } = require('../middlewares/rateLimiters')
 const {
   registerSchema,
   loginSchema,
+  verifyEmailSchema,
+  resendVerificationSchema,
   forgotPasswordSchema,
   resetPasswordSchema,
   changePasswordSchema,
@@ -16,6 +18,9 @@ const {
 
 router.post('/register', authLimiter, validate(registerSchema), authController.register)
 router.post('/login', authLimiter, validate(loginSchema), authController.login)
+router.post('/verify-email', sensitiveLimiter, validate(verifyEmailSchema), authController.verifyEmail)
+router.get('/verify-email', sensitiveLimiter, authController.verifyEmail)
+router.post('/resend-verification', sensitiveLimiter, validate(resendVerificationSchema), authController.resendVerification)
 router.post('/forgot-password', sensitiveLimiter, validate(forgotPasswordSchema), authController.forgotPassword)
 router.post('/reset-password', sensitiveLimiter, validate(resetPasswordSchema), authController.resetPassword)
 router.get('/me', authenticate, authController.getMe)

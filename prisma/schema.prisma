@@ -39,6 +39,11 @@ model User {
   passwordResetToken   String?   @unique
   passwordResetExpires DateTime?
 
+  // Validation d'adresse email
+  emailVerified            Boolean   @default(false)
+  emailVerificationToken   String?   @unique
+  emailVerificationExpires DateTime?
+
   orders       Order[]
   appointments Appointment[]
   invoices     Invoice[]

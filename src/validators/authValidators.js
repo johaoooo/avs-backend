@@ -18,12 +18,18 @@ const emailSchema = z
   .email('Adresse email invalide.')
   .optional()
 
+const requiredEmailSchema = z
+  .string({ required_error: 'L’adresse email est obligatoire.' })
+  .trim()
+  .toLowerCase()
+  .email('Adresse email invalide.')
+
 const phoneSchema = z.string().trim().min(1).max(25).optional()
 
 const registerSchema = z.object({
   name: z.string().trim().min(2, 'Le nom doit contenir au moins 2 caractères.').max(120).optional(),
   fullName: z.string().trim().min(2).max(120).optional(),
-  email: emailSchema,
+  email: requiredEmailSchema,
   phone: phoneSchema,
   password: passwordSchema,
 })
@@ -33,6 +39,16 @@ const loginSchema = z.object({
   email: emailSchema,
   phone: phoneSchema,
   password: z.string().min(1, 'Mot de passe requis.'),
+})
+
+const verifyEmailSchema = z.object({
+  token: z.string().min(10, 'Jeton de validation manquant ou invalide.'),
+})
+
+const resendVerificationSchema = z.object({
+  identifier: z.string().trim().min(1).max(160).optional(),
+  email: emailSchema,
+  phone: phoneSchema,
 })
 
 const forgotPasswordSchema = z.object({
@@ -60,6 +76,8 @@ const updateProfileSchema = z.object({
 module.exports = {
   registerSchema,
   loginSchema,
+  verifyEmailSchema,
+  resendVerificationSchema,
   forgotPasswordSchema,
   resetPasswordSchema,
   changePasswordSchema,

@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken')
 const prisma = require('../lib/prisma')
 const { JWT_SECRET, JWT_EXPIRES_IN, FRONTEND_URL } = require('../config/env')
 const { checkPassword, normalizePhone } = require('../lib/accountPolicy')
-const { sendMail, resetPasswordMail, hasMailer, isProd } = require('../lib/mailer')
+const { sendMail, verificationEmailMail, resetPasswordMail, hasMailer, isProd } = require('../lib/mailer')
 
 function generateToken(userId) {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN })
@@ -16,12 +16,19 @@ exports.register = async (req, res, next) => {
     const { email, password, name, fullName, phone } = req.body
     const finalName = (name || fullName || '').trim()
     const finalPhone = normalizePhone(phone || '')
-    const finalEmail = (email || `${(finalPhone || '').replace(/\D/g, '') || Date.now()}@agrovetoservices.cg`).toLowerCase().trim()
+    const finalEmail = (email || '').toLowerCase().trim()
 
     if (!finalName) {
       return res.status(400).json({
         success: false,
         message: 'Champ obligatoire : nom complet',
+      })
+    }
+
+    if (!finalEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(finalEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Adresse email valide obligatoire pour la confirmation de votre compte.',
       })
     }
 
@@ -55,6 +62,10 @@ exports.register = async (req, res, next) => {
 
     const hashedPassword = await bcrypt.hash(password, 10)
 
+    const rawToken = crypto.randomBytes(32).toString('hex')
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')
+    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000) // 24h
+
     const user = await prisma.user.create({
       data: {
         email: finalEmail,
@@ -62,6 +73,9 @@ exports.register = async (req, res, next) => {
         name: finalName,
         phone: finalPhone || null,
         role: 'CLIENT',
+        emailVerified: false,
+        emailVerificationToken: tokenHash,
+        emailVerificationExpires: verificationExpires,
       },
       select: {
         id: true,
@@ -69,16 +83,40 @@ exports.register = async (req, res, next) => {
         name: true,
         phone: true,
         role: true,
+        emailVerified: true,
         createdAt: true,
       },
     })
 
-    const token = generateToken(user.id)
+    const origin = req.get('origin') || FRONTEND_URL || 'http://localhost:3003'
+    const verifyUrl = `${origin.replace(/\/+$/, '')}/verifier-email?token=${rawToken}`
+    const mail = verificationEmailMail({ name: user.name, verifyUrl })
+
+    if (hasMailer()) {
+      try {
+        await sendMail({ to: user.email, subject: mail.subject, html: mail.html })
+      } catch (mailError) {
+        console.error('[Auth] Échec envoi email validation:', mailError.message)
+      }
+    } else {
+      console.info(`[Auth] [DEV] Lien de validation pour ${user.email} : ${verifyUrl}`)
+    }
+
+    let devVerifyUrl = null
+    if (!isProd() && !hasMailer()) {
+      devVerifyUrl = verifyUrl
+    }
 
     res.status(201).json({
       success: true,
-      message: 'Compte créé avec succès',
-      data: { user, token },
+      requiresVerification: true,
+      email: user.email,
+      message: 'Compte créé avec succès ! Un email de confirmation a été envoyé à votre adresse email. Veuillez cliquer sur le lien reçu pour activer votre compte.',
+      data: {
+        user,
+        requiresVerification: true,
+        ...(devVerifyUrl ? { devVerifyUrl } : {}),
+      },
     })
   } catch (error) {
     next(error)
@@ -124,6 +162,15 @@ exports.login = async (req, res, next) => {
       })
     }
 
+    if (!user.emailVerified) {
+      return res.status(403).json({
+        success: false,
+        requiresVerification: true,
+        email: user.email,
+        message: 'Veuillez valider votre adresse email avant d’accéder à votre compte. Un lien de confirmation vous a été envoyé par email.',
+      })
+    }
+
     const token = generateToken(user.id)
 
     res.json({
@@ -137,9 +184,146 @@ exports.login = async (req, res, next) => {
           phone: user.phone,
           role: user.role,
           avatar: user.avatar,
+          emailVerified: user.emailVerified,
         },
         token,
       },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// ── Validation de l'adresse email par jeton (token)
+exports.verifyEmail = async (req, res, next) => {
+  try {
+    const token = req.body?.token || req.query?.token
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Jeton de validation manquant ou invalide.',
+      })
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(String(token)).digest('hex')
+    const user = await prisma.user.findFirst({
+      where: {
+        emailVerificationToken: tokenHash,
+        emailVerificationExpires: { gt: new Date() },
+      },
+    })
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Le lien de validation est invalide ou a expiré (validité de 24 heures). Veuillez faire une nouvelle demande.',
+      })
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerified: true,
+        emailVerificationToken: null,
+        emailVerificationExpires: null,
+        isActive: true,
+      },
+    })
+
+    const sessionToken = generateToken(user.id)
+
+    res.json({
+      success: true,
+      message: 'Votre adresse email a été validée avec succès ! Vous pouvez maintenant accéder à votre compte.',
+      data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          phone: user.phone,
+          role: user.role,
+          avatar: user.avatar,
+          emailVerified: true,
+        },
+        token: sessionToken,
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// ── Renvoyer un email de validation
+exports.resendVerification = async (req, res, next) => {
+  try {
+    const { email, phone, identifier } = req.body
+    const loginId = (identifier || email || phone || '').toLowerCase().trim()
+    const loginPhone = normalizePhone(identifier || phone || '') || ''
+
+    if (!loginId && !loginPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Veuillez renseigner votre adresse email.',
+      })
+    }
+
+    const user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email: loginId },
+          ...(loginPhone ? [{ phone: loginPhone }] : []),
+        ],
+      },
+    })
+
+    const genericMessage = 'Si ce compte existe et n’est pas encore validé, un nouveau lien de validation vient d’être envoyé par email.'
+
+    if (!user) {
+      return res.json({ success: true, message: genericMessage })
+    }
+
+    if (user.emailVerified) {
+      return res.json({
+        success: true,
+        alreadyVerified: true,
+        message: 'Cette adresse email est déjà validée. Vous pouvez vous connecter directement.',
+      })
+    }
+
+    const rawToken = crypto.randomBytes(32).toString('hex')
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex')
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerificationToken: tokenHash,
+        emailVerificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      },
+    })
+
+    const origin = req.get('origin') || FRONTEND_URL || 'http://localhost:3003'
+    const verifyUrl = `${origin.replace(/\/+$/, '')}/verifier-email?token=${rawToken}`
+    const mail = verificationEmailMail({ name: user.name, verifyUrl })
+
+    if (hasMailer()) {
+      try {
+        await sendMail({ to: user.email, subject: mail.subject, html: mail.html })
+      } catch (mailError) {
+        console.error('[Auth] Échec envoi email validation:', mailError.message)
+      }
+    } else {
+      console.info(`[Auth] [DEV] Lien de validation pour ${user.email} : ${verifyUrl}`)
+    }
+
+    let devVerifyUrl = null
+    if (!isProd() && !hasMailer()) {
+      devVerifyUrl = verifyUrl
+    }
+
+    res.json({
+      success: true,
+      message: `Un nouveau lien de validation a été envoyé à l'adresse ${user.email}.`,
+      ...(devVerifyUrl ? { devVerifyUrl } : {}),
     })
   } catch (error) {
     next(error)
@@ -157,6 +341,7 @@ exports.getMe = async (req, res, next) => {
         phone: true,
         role: true,
         avatar: true,
+        emailVerified: true,
         createdAt: true,
         orders: {
           orderBy: { createdAt: 'desc' },
@@ -200,6 +385,7 @@ exports.updateProfile = async (req, res, next) => {
         phone: true,
         role: true,
         avatar: true,
+        emailVerified: true,
       },
     })
 
@@ -252,6 +438,7 @@ exports.listUsers = async (req, res, next) => {
         name: true,
         phone: true,
         role: true,
+        emailVerified: true,
         isActive: true,
         createdAt: true,
         _count: { select: { orders: true, appointments: true } },
@@ -296,7 +483,8 @@ exports.forgotPassword = async (req, res, next) => {
           },
         })
 
-        const resetUrl = `${FRONTEND_URL.replace(/\/+$/, '')}/mot-de-passe-oublie?token=${rawToken}`
+        const origin = req.get('origin') || FRONTEND_URL || 'http://localhost:3003'
+        const resetUrl = `${origin.replace(/\/+$/, '')}/mot-de-passe-oublie?token=${rawToken}`
         const mail = resetPasswordMail({ name: user.name, resetUrl })
 
         if (hasMailer()) {
@@ -309,8 +497,6 @@ exports.forgotPassword = async (req, res, next) => {
           console.info(`[Auth] [DEV] Lien de réinitialisation pour ${user.email} : ${resetUrl}`)
         }
 
-        // En dev (sans mailer configuré), le lien est renvoyé pour test.
-        // En production il n'est transmis QUE par email.
         if (!isProd() && !hasMailer()) {
           return res.json({ success: true, message: genericMessage, devResetUrl: resetUrl })
         }
